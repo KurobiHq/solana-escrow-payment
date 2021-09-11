@@ -86,8 +86,10 @@ export const ACCOUNT_LAYOUT = BufferLayout.struct([
 export const ESCROW_ACCOUNT_DATA_LAYOUT = BufferLayout.struct([
     BufferLayout.u8("isInitialized"),
     BufferLayout.u8("isSettled"),
+    BufferLayout.u8("isCanceled"),
     publicKeyLayout("payerPubkey"),
-    publicKeyLayout("payeePubkey"),
+    publicKeyLayout("payerTokenAccountPubkey"),
+    publicKeyLayout("payeeTokenAccountPubkey"),
     publicKeyLayout("payerTempTokenAccountPubkey"),
     publicKeyLayout("authorityPubkey"),
     publicKeyLayout("feeTakerPubkey"),
@@ -98,8 +100,10 @@ export const ESCROW_ACCOUNT_DATA_LAYOUT = BufferLayout.struct([
 export interface EscrowLayout {
     isInitialized: number,
     isSettled: number,
+    isCanceled: number,
     payerPubkey: PublicKey,
-    payeePubkey: PublicKey,
+    payerTokenAccountPubkey: PublicKey,
+    payeeTokenAccountPubkey: PublicKey,
     payerTempTokenAccountPubkey: PublicKey,
     authorityPubkey: PublicKey,
     feeTakerPubkey: PublicKey,

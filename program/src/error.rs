@@ -17,10 +17,12 @@ pub enum EscrowError {
     AmountOverflow,
     #[error("Account already settled")]
     AccountAlreadySettled,
+    #[error("Account already cancled")]
+    AccountAlreadyCanceled,
     #[error("Fee overflow")]
     FeeOverflow,
-    #[error("Account settled")]
-    AccountNotSettled
+    #[error("Account not settled or canceled")]
+    AccountNotSettledOrCanceled
 }
 
 impl From<EscrowError> for ProgramError {

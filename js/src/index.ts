@@ -19,7 +19,9 @@ import {
     TransferOutput,
     InitializePaymentOutput,
     SettlePaymentOutput,
-    ClosePaymentInput
+    ClosePaymentInput,
+    CancelPaymentInput,
+    CancelPaymentOutput
 } from './types';
 import {
     transfer,
@@ -39,6 +41,9 @@ import {
 export const FAILED_TO_FIND_ACCOUNT = 'Failed to find account';
 export const INVALID_ACCOUNT_OWNER = 'Invalid account owner';
 export const INVALID_AUTHORITY = 'Invalid authority';
+export const INVALID_PAYER_ADDRESS = 'Invalid payer address';
+export const ACCOUNT_ALREADY_CANCELED = 'Account already canceled';
+export const ACCOUNT_ALREADY_SETTLED = 'Account already settled';
 export const INVALID_SIGNATURE = 'Invalid signature';
 export const AMOUNT_MISMATCH = 'Amount mismatch';
 export const FEE_MISMATCH = 'Fee mismatch';
@@ -71,12 +76,78 @@ export class WalletServiceClient {
         this.escrowProgram = escrowProgram;
     }
 
+    cancelEscrowPayment = async (
+        input: CancelPaymentInput
+    ): Promise<CancelPaymentOutput> => {
+        const escrowAddress = new PublicKey(input.escrowAddress);
+        const info = await this.connection.getAccountInfo(escrowAddress);
+        if (!info) {
+            throw new Error(FAILED_TO_FIND_ACCOUNT);
+        }
+        if (!info.owner.equals(this.escrowProgram)) {
+            throw new Error(INVALID_ACCOUNT_OWNER);
+        }
+        
+        const accountInfo = ESCROW_ACCOUNT_DATA_LAYOUT.decode(info.data) as EscrowLayout;
+        const escrowState = {
+            escrowAddress,
+            isInitialized: !!accountInfo.isInitialized,
+            isSettled: !!accountInfo.isSettled,
+            isCanceled: !!accountInfo.isCanceled,
+            payerPubkey: accountInfo.payerPubkey,
+            payerTokenAccountPubkey: accountInfo.payerTokenAccountPubkey,
+            payeeTokenAccountPubkey: accountInfo.payeeTokenAccountPubkey,
+            payerTempTokenAccountPubkey: accountInfo.payerTempTokenAccountPubkey,
+            authorityPubkey: accountInfo.authorityPubkey,
+            feeTakerPubkey: accountInfo.feeTakerPubkey,
+            expectedAmount: new BN(accountInfo.amount, 10, "le"),
+            fee: new BN(accountInfo.fee, 10, "le")
+        };
+        if (!this.authority.publicKey.equals(escrowState.authorityPubkey)) {
+            throw new Error(INVALID_AUTHORITY);
+        }
+        if (escrowState.isCanceled) {
+            throw new Error(ACCOUNT_ALREADY_CANCELED);
+        }
+        if (escrowState.isSettled) {
+            throw new Error(ACCOUNT_ALREADY_SETTLED);
+        }
+        const PDA = await PublicKey.findProgramAddress([Buffer.from("escrow")], this.escrowProgram);
+        const exchangeInstruction = new TransactionInstruction({
+            programId: this.escrowProgram,
+            data: Buffer.from(Uint8Array.of(2)),
+            keys: [
+                { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
+                { pubkey: escrowAddress, isSigner: false, isWritable: true },
+                { pubkey: accountInfo.payerTokenAccountPubkey, isSigner: false, isWritable: true },
+                { pubkey: this.feePayer.publicKey, isSigner: false, isWritable: true },
+                { pubkey: escrowState.payerTempTokenAccountPubkey, isSigner: false, isWritable: true },
+                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                { pubkey: PDA[0], isSigner: false, isWritable: false }
+            ]
+        })
+        const transaction = new Transaction().add(exchangeInstruction);
+        if (input.memo) {
+            transaction.add(memoInstruction(input.memo, this.authority.publicKey))
+        }
+        transaction.recentBlockhash = (await this.connection.getRecentBlockhash()).blockhash;
+        transaction.feePayer = this.feePayer.publicKey;
+        transaction.sign(this.feePayer, this.authority);
+        try {
+            const signature = await this.connection.sendRawTransaction(transaction.serialize(), { skipPreflight: false });
+            return { signature }
+        } catch (error) {
+            const newError: any = new Error(TRANSACTION_SEND_ERROR);
+            throw newError;
+        }
+    }
+
     closeEscrowPayment = async (
         input: ClosePaymentInput
     ): Promise<string> => {
         const exchangeInstruction = new TransactionInstruction({
             programId: this.escrowProgram,
-            data: Buffer.from(Uint8Array.of(2)),
+            data: Buffer.from(Uint8Array.of(3)),
             keys: [
                 { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
                 { pubkey: new PublicKey(input.escrowAddress), isSigner: false, isWritable: true },
@@ -333,6 +404,7 @@ export class WalletServiceClient {
                 { pubkey: tempTokenAccount.publicKey, isSigner: false, isWritable: true },
                 { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
                 { pubkey: escrowAccount.publicKey, isSigner: false, isWritable: true },
+                { pubkey: tokenAccountAddress, isSigner: false, isWritable: false },
                 { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
                 { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
             ],
@@ -388,7 +460,8 @@ export class WalletServiceClient {
             isInitialized: !!accountInfo.isInitialized,
             isSettled: !!accountInfo.isSettled,
             payerPubkey: accountInfo.payerPubkey,
-            payeePubkey: accountInfo.payeePubkey,
+            payerTokenAccountPubkey: accountInfo.payerTokenAccountPubkey,
+            payeeTokenAccountPubkey: accountInfo.payeeTokenAccountPubkey,
             payerTempTokenAccountPubkey: accountInfo.payerTempTokenAccountPubkey,
             authorityPubkey: accountInfo.authorityPubkey,
             feeTakerPubkey: accountInfo.feeTakerPubkey,
@@ -506,4 +579,3 @@ const createTransferBetweenSplTokenAccountsInstructionInternal = (
     }
     return transaction;
 }
-

@@ -79,6 +79,15 @@ export interface SettlePaymentInput {
     fee?: number;
 }
 
+export interface CancelPaymentInput {
+    escrowAddress: string;
+    memo?: string;
+}
+
+export interface CancelPaymentOutput {
+    signature: string,
+}
+
 export interface ClosePaymentInput {
     escrowAddress: string
     memo?: string;
@@ -94,4 +103,3 @@ export interface GetTransactionSignatureByMemoInpt {
     until?: string;
     memo: string;
 }
-

@@ -1,7 +1,7 @@
 use crate::{
     error::EscrowError::{
-        AccountAlreadySettled, AccountNotSettled, AmountOverflow, ExpectedAmountMismatch,
-        FeeOverflow, NotRentExempt,
+        AccountAlreadySettled, AmountOverflow, ExpectedAmountMismatch,
+        FeeOverflow, NotRentExempt, AccountAlreadyCanceled, AccountNotSettledOrCanceled
     },
     instruction::EscrowInstruction,
     state::Escrow,
@@ -36,6 +36,10 @@ impl Processor {
                 msg!("Instruction: Settle");
                 Self::process_settlement(accounts, fee, program_id)
             }
+            EscrowInstruction::Cancel => {
+                msg!("Instruction: Cancel");
+                Self::process_cancel(accounts, program_id)
+            }
             EscrowInstruction::Close => {
                 msg!("Instruction: Close");
                 Self::process_close(accounts, program_id)
@@ -54,7 +58,6 @@ impl Processor {
         if !payer_account.is_signer {
             return Err(ProgramError::MissingRequiredSignature);
         }
-
         let payer_temp_token_account = next_account_info(account_info_iter)?;
         if *payer_temp_token_account.owner != spl_token::id() {
             return Err(ProgramError::IncorrectProgramId);
@@ -77,20 +80,22 @@ impl Processor {
         }
 
         let escrow_account = next_account_info(account_info_iter)?;
+        let payer_token_account_pubkey = next_account_info(account_info_iter)?;
+
         let rent = &Rent::from_account_info(next_account_info(account_info_iter)?)?;
 
         if !rent.is_exempt(escrow_account.lamports(), escrow_account.data_len()) {
             return Err(NotRentExempt.into());
         }
-
         let mut escrow_info = Escrow::unpack_unchecked(&escrow_account.data.borrow())?;
         if escrow_info.is_initialized() {
             return Err(ProgramError::AccountAlreadyInitialized);
         }
-
         escrow_info.is_initialized = true;
         escrow_info.is_settled = false;
+        escrow_info.is_canceled = false;
         escrow_info.payer_pubkey = *payer_account.key;
+        escrow_info.payer_token_account_pubkey = *payer_token_account_pubkey.key;
         escrow_info.payer_temp_token_account_pubkey = *payer_temp_token_account.key;
         escrow_info.authority_pubkey = *authority.key;
         escrow_info.amount = amount;
@@ -144,6 +149,9 @@ impl Processor {
         let escrow_account = next_account_info(account_info_iter)?;
         let mut escrow_info = Escrow::unpack(&escrow_account.data.borrow())?;
 
+        if escrow_info.is_canceled() {
+            return Err(AccountAlreadyCanceled.into());
+        }
         if escrow_info.is_settled() {
             return Err(AccountAlreadySettled.into());
         }
@@ -281,8 +289,135 @@ impl Processor {
         msg!("Mark the escrow account as settled...");
         escrow_info.is_settled = true;
         escrow_info.fee = fee;
-        escrow_info.payee_pubkey = *takers_account.key;
+        escrow_info.payee_token_account_pubkey = *takers_account.key;
         escrow_info.fee_taker_pubkey = *fee_taker_account.key;
+        Escrow::pack(escrow_info, &mut escrow_account.data.borrow_mut())?;
+        Ok(())
+    }
+
+    //inside: impl Processor {}
+    fn process_cancel(
+        accounts: &[AccountInfo],
+        program_id: &Pubkey,
+    ) -> ProgramResult {
+        msg!("Process cancelation");
+        let account_info_iter = &mut accounts.iter();
+        let authority = next_account_info(account_info_iter)?;
+
+        if !authority.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        let escrow_account = next_account_info(account_info_iter)?;
+        let payer_token_account_pubkey = next_account_info(account_info_iter)?;
+        let fee_payer_account = next_account_info(account_info_iter)?;
+        let pdas_temp_token_account = next_account_info(account_info_iter)?;
+        let pdas_temp_token_account_info =
+            TokenAccount::unpack(&pdas_temp_token_account.data.borrow())?;
+
+        let mut escrow_info = Escrow::unpack(&escrow_account.data.borrow())?;
+
+        if escrow_info.is_canceled() {
+            return Err(AccountAlreadyCanceled.into());
+        }
+        if escrow_info.is_settled() {
+            return Err(AccountAlreadySettled.into());
+        }
+        if escrow_info.authority_pubkey != *authority.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        if escrow_info.payer_temp_token_account_pubkey != *pdas_temp_token_account.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        if escrow_info.payer_token_account_pubkey != *payer_token_account_pubkey.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        
+        let token_program = next_account_info(account_info_iter)?;
+
+        let (pda, bump_seed) = Pubkey::find_program_address(&[b"escrow"], program_id);
+
+        let pda_account = next_account_info(account_info_iter)?;
+        if pda != *pda_account.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        let amount = pdas_temp_token_account_info.amount;
+
+        if pdas_temp_token_account_info.is_native() {
+            let close_pdas_temp_acc_ix = spl_token::instruction::close_account(
+                token_program.key,
+                pdas_temp_token_account.key,
+                escrow_account.key,
+                &pda,
+                &[&pda],
+            )?;
+            msg!("Calling the token program to close pda's temp account...and add the remaining lamports to the escrow account");
+            invoke_signed(
+                &close_pdas_temp_acc_ix,
+                &[
+                    pdas_temp_token_account.clone(),
+                    escrow_account.clone(),
+                    pda_account.clone(),
+                    token_program.clone(),
+                ],
+                &[&[&b"escrow"[..], &[bump_seed]]],
+            )?;
+            let source_starting_lamports = escrow_account.lamports();
+            **escrow_account.lamports.borrow_mut() = source_starting_lamports
+                .checked_sub(amount)
+                .ok_or(AmountOverflow)?;
+
+            let dest_starting_lamports = payer_token_account_pubkey.lamports();
+            **payer_token_account_pubkey.lamports.borrow_mut() = dest_starting_lamports
+                .checked_add(amount)
+                .ok_or(AmountOverflow)?;
+        } else {
+            let transfer_to_payer_ix = spl_token::instruction::transfer(
+                token_program.key,
+                pdas_temp_token_account.key,
+                payer_token_account_pubkey.key,
+                &pda,
+                &[&pda],
+                amount,
+            )?;
+            msg!("Calling the token program to transfer tokens to the payer...");
+            let seed = &b"escrow"[..];
+            invoke_signed(
+                &transfer_to_payer_ix,
+                &[
+                    pdas_temp_token_account.clone(),
+                    payer_token_account_pubkey.clone(),
+                    pda_account.clone(),
+                    token_program.clone(),
+                ],
+                &[&[seed, &[bump_seed]]],
+            )?;
+
+            let close_pdas_temp_acc_ix = spl_token::instruction::close_account(
+                token_program.key,
+                pdas_temp_token_account.key,
+                fee_payer_account.key,
+                &pda,
+                &[&pda],
+            )?;
+            msg!("Calling the token program to close pda's temp account...");
+            invoke_signed(
+                &close_pdas_temp_acc_ix,
+                &[
+                    pdas_temp_token_account.clone(),
+                    fee_payer_account.clone(),
+                    pda_account.clone(),
+                    token_program.clone(),
+                ],
+                &[&[&b"escrow"[..], &[bump_seed]]],
+            )?;
+        }
+
+        msg!("Mark the escrow account as settled...");
+        escrow_info.is_canceled = true;
         Escrow::pack(escrow_info, &mut escrow_account.data.borrow_mut())?;
         Ok(())
     }
@@ -307,8 +442,8 @@ impl Processor {
             return Err(ProgramError::InvalidAccountData);
         }
 
-        if !escrow_info.is_settled() {
-            return Err(AccountNotSettled.into());
+        if !(escrow_info.is_settled() || escrow_info.is_canceled()){
+            return Err(AccountNotSettledOrCanceled.into());
         }
 
         let fee_payer_account = next_account_info(account_info_iter)?;

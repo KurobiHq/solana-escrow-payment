@@ -7,8 +7,10 @@ use solana_program::{
 pub struct Escrow {
     pub is_initialized: bool,
     pub is_settled: bool,
+    pub is_canceled: bool,
     pub payer_pubkey: Pubkey,
-    pub payee_pubkey: Pubkey,
+    pub payer_token_account_pubkey: Pubkey,
+    pub payee_token_account_pubkey: Pubkey,
     pub payer_temp_token_account_pubkey: Pubkey,
     pub authority_pubkey: Pubkey,
     pub fee_taker_pubkey: Pubkey,
@@ -20,25 +22,30 @@ impl Escrow {
     pub fn is_settled(&self) -> bool {
         self.is_settled
     }
+    pub fn is_canceled(&self) -> bool {
+        self.is_canceled
+    }
 }
 
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
 
 impl Pack for Escrow {
-    const LEN: usize = 178;
+    const LEN: usize = 211;
     fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
         let src = array_ref![src, 0, Escrow::LEN];
         let (
             is_initialized,
             is_settled,
+            is_canceled,
             payer_pubkey,
-            payee_pubkey,
+            payer_token_account_pubkey,
+            payee_token_account_pubkey,
             payer_temp_token_account_pubkey,
             authority_pubkey,
             fee_taker_pubkey,
             amount,
             fee,
-        ) = array_refs![src, 1, 1, 32, 32, 32, 32, 32, 8, 8];
+        ) = array_refs![src, 1, 1, 1, 32, 32, 32, 32, 32, 32, 8, 8];
         let is_initialized = match is_initialized {
             [0] => false,
             [1] => true,
@@ -49,12 +56,19 @@ impl Pack for Escrow {
             [1] => true,
             _ => return Err(ProgramError::InvalidAccountData),
         };
+        let is_canceled = match is_canceled {
+            [0] => false,
+            [1] => true,
+            _ => return Err(ProgramError::InvalidAccountData),
+        };
         Ok(Escrow {
             is_initialized,
             is_settled,
+            is_canceled,
             payer_pubkey: Pubkey::new_from_array(*payer_pubkey),
-            payee_pubkey: Pubkey::new_from_array(
-                *payee_pubkey,
+            payer_token_account_pubkey: Pubkey::new_from_array(*payer_token_account_pubkey),
+            payee_token_account_pubkey: Pubkey::new_from_array(
+                *payee_token_account_pubkey,
             ),
             payer_temp_token_account_pubkey: Pubkey::new_from_array(
                 *payer_temp_token_account_pubkey,
@@ -71,20 +85,24 @@ impl Pack for Escrow {
         let (
             is_initialized_dst,
             is_settled_dst,
+            is_canceled_dst,
             payer_pubkey_dst,
-            payer_receiving_token_account_pubkey_dst,
+            payer_token_account_pubkey_dst,
+            payee_token_account_pubkey_dst,
             payer_temp_token_account_pubkey_dst,
             authority_pubkey_dst,
             fee_taker_pubkey_dst,
             expected_amount_dst,
             expected_fees_dst,
-        ) = mut_array_refs![dst, 1, 1, 32, 32, 32, 32, 32, 8, 8];
+        ) = mut_array_refs![dst, 1, 1, 1, 32, 32, 32, 32, 32, 32, 8, 8];
 
         let Escrow {
             is_initialized,
             is_settled,
+            is_canceled,
             payer_pubkey,
-            payee_pubkey,
+            payer_token_account_pubkey,
+            payee_token_account_pubkey,
             payer_temp_token_account_pubkey,
             authority_pubkey,
             fee_taker_pubkey,
@@ -94,9 +112,12 @@ impl Pack for Escrow {
 
         is_initialized_dst[0] = *is_initialized as u8;
         is_settled_dst[0] = *is_settled as u8;
+        is_canceled_dst[0] = *is_canceled as u8;
         payer_pubkey_dst.copy_from_slice(payer_pubkey.as_ref());
-        payer_receiving_token_account_pubkey_dst
-            .copy_from_slice(payee_pubkey.as_ref());
+        payer_token_account_pubkey_dst
+            .copy_from_slice(payer_token_account_pubkey.as_ref());
+        payee_token_account_pubkey_dst
+            .copy_from_slice(payee_token_account_pubkey.as_ref());
         payer_temp_token_account_pubkey_dst
             .copy_from_slice(payer_temp_token_account_pubkey.as_ref());
         authority_pubkey_dst.copy_from_slice(authority_pubkey.as_ref());
