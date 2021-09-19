@@ -1,3 +1,4 @@
+import { Keypair } from "@solana/web3.js";
 
 export interface CreateAssociatedTokenInput {
     walletAddress: string;
@@ -74,6 +75,19 @@ export interface SendPaymentInput {
 export interface SettlePaymentInput {
     walletAddress: string;
     amount: number;
+    escrowAddress: string
+    memo?: string;
+    fee?: number;
+}
+
+export interface SettleAndTransferInput {
+    settleToWalletAddress: string;
+    settleFromWalletAddress: string;
+    transferToWalletAddress: string;
+    transferFromWalletAddress: string;
+    transferFromOwner: Keypair
+    amountToSettle: number;
+    amountToTransfer: number;
     escrowAddress: string
     memo?: string;
     fee?: number;

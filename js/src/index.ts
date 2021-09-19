@@ -21,7 +21,8 @@ import {
     SettlePaymentOutput,
     ClosePaymentInput,
     CancelPaymentInput,
-    CancelPaymentOutput
+    CancelPaymentOutput,
+    SettleAndTransferInput
 } from './types';
 import {
     transfer,
@@ -87,7 +88,7 @@ export class WalletServiceClient {
         if (!info.owner.equals(this.escrowProgram)) {
             throw new Error(INVALID_ACCOUNT_OWNER);
         }
-        
+
         const accountInfo = ESCROW_ACCOUNT_DATA_LAYOUT.decode(info.data) as EscrowLayout;
         const escrowState = {
             escrowAddress,
@@ -454,6 +455,74 @@ export class WalletServiceClient {
         if (!info.owner.equals(this.escrowProgram)) {
             throw new Error(INVALID_ACCOUNT_OWNER);
         }
+        const transaction = new Transaction();
+        const { transactionInstruction, takerAccount } = await this.settlementInstruction(walletAddress, escrowAddress, input.amount, input.fee);
+        transaction.add(transactionInstruction);
+        if (input.memo) {
+            transaction.add(memoInstruction(input.memo, this.authority.publicKey))
+        }
+        transaction.recentBlockhash = (await this.connection.getRecentBlockhash()).blockhash;
+        transaction.feePayer = this.feePayer.publicKey;
+        transaction.sign(this.feePayer, this.authority);
+        try {
+            const signature = await this.connection.sendRawTransaction(transaction.serialize(), { skipPreflight: false });
+            return { signature, destinationWalletAddress: takerAccount.toBase58() }
+        } catch (error) {
+            const newError: any = new Error(TRANSACTION_SEND_ERROR);
+            newError.destinationWalletAddress = takerAccount
+            throw newError;
+        }
+    }
+
+    settleEscrowPaymentAndTransfer = async (
+        settlementInput: SettleAndTransferInput
+    ): Promise<SettlePaymentOutput> => {
+        const settleToWalletAddress = new PublicKey(settlementInput.settleToWalletAddress);
+        const escrowAddress = new PublicKey(settlementInput.escrowAddress);
+        const info = await this.connection.getAccountInfo(escrowAddress);
+        if (!info) {
+            throw new Error(FAILED_TO_FIND_ACCOUNT);
+        }
+        if (!info.owner.equals(this.escrowProgram)) {
+            throw new Error(INVALID_ACCOUNT_OWNER);
+        }
+        const transaction = new Transaction();
+        const { transactionInstruction, takerAccount } = await this.settlementInstruction(settleToWalletAddress, escrowAddress, settlementInput.amountToSettle, settlementInput.fee);
+        transaction.add(transactionInstruction);
+        const walletAddress = settlementInput.transferFromOwner.publicKey;
+        const sourcePublicKey = new PublicKey(settlementInput.transferFromWalletAddress);
+        const destinationPublicKey = new PublicKey(settlementInput.transferToWalletAddress);
+        const transferBetweenAccountsTxn = createTransferBetweenSplTokenAccountsInstructionInternal(
+            walletAddress, sourcePublicKey, destinationPublicKey, settlementInput.amountToTransfer,
+        );
+        transaction.add(transferBetweenAccountsTxn);
+        if (settlementInput.memo) {
+            transaction.add(memoInstruction(settlementInput.memo, this.authority.publicKey))
+        }
+        transaction.recentBlockhash = (await this.connection.getRecentBlockhash()).blockhash;
+        transaction.feePayer = this.feePayer.publicKey;
+        transaction.sign(this.feePayer, this.authority, settlementInput.transferFromOwner);
+        try {
+            const signature = await this.connection.sendRawTransaction(transaction.serialize(), { skipPreflight: false });
+            return { signature, destinationWalletAddress: takerAccount.toBase58() }
+        } catch (error) {
+            const newError: any = new Error(TRANSACTION_SEND_ERROR);
+            newError.destinationWalletAddress = takerAccount
+            throw newError;
+        }
+    }
+
+    settlementInstruction = async (walletAddress: PublicKey, escrowAddress: PublicKey, amount: number, settlementFee: number = 0): Promise<{
+        transactionInstruction: TransactionInstruction,
+        takerAccount: PublicKey
+    }> => {
+        const info = await this.connection.getAccountInfo(escrowAddress);
+        if (!info) {
+            throw new Error(FAILED_TO_FIND_ACCOUNT);
+        }
+        if (!info.owner.equals(this.escrowProgram)) {
+            throw new Error(INVALID_ACCOUNT_OWNER);
+        }
         const accountInfo = ESCROW_ACCOUNT_DATA_LAYOUT.decode(info.data) as EscrowLayout;
         const escrowState = {
             escrowAddress,
@@ -468,8 +537,8 @@ export class WalletServiceClient {
             expectedAmount: new BN(accountInfo.amount, 10, "le"),
             fee: new BN(accountInfo.fee, 10, "le")
         };
-        const expectedAmount = new BN(input.amount);
-        const fee = new BN(input.fee || 0);
+        const expectedAmount = new BN(amount);
+        const fee = new BN(settlementFee || 0);
 
         if (!expectedAmount.eq(escrowState.expectedAmount)) {
             throw new Error(AMOUNT_MISMATCH);
@@ -500,21 +569,7 @@ export class WalletServiceClient {
                 { pubkey: PDA[0], isSigner: false, isWritable: false }
             ]
         })
-        const transaction = new Transaction().add(exchangeInstruction);
-        if (input.memo) {
-            transaction.add(memoInstruction(input.memo, this.authority.publicKey))
-        }
-        transaction.recentBlockhash = (await this.connection.getRecentBlockhash()).blockhash;
-        transaction.feePayer = this.feePayer.publicKey;
-        transaction.sign(this.feePayer, this.authority);
-        try {
-            const signature = await this.connection.sendRawTransaction(transaction.serialize(), { skipPreflight: false });
-            return { signature, destinationWalletAddress: takerAccount.toBase58() }
-        } catch (error) {
-            const newError: any = new Error(TRANSACTION_SEND_ERROR);
-            newError.destinationWalletAddress = takerAccount
-            throw newError;
-        }
+        return { takerAccount, transactionInstruction: exchangeInstruction};
     }
 
     signTransaction = (
